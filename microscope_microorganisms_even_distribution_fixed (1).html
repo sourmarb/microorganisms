@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Microscope — redrawn microorganisms</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080604}
+#app{position:relative;width:100vw;height:100vh;overflow:hidden;background:#080604}
+#scene{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab}
+#scene.dragging{cursor:grabbing}
+#vignette{display:none !important}
+#glass{display:none}
+#grain{position:absolute;inset:0;z-index:6;pointer-events:none;opacity:.018;mix-blend-mode:multiply;background-image:radial-gradient(rgba(83,58,40,.7) .4px,transparent .65px);background-size:11px 11px}
+#label{position:absolute;z-index:7;left:50%;top:50%;transform:translate(-50%,-50%);font:11px Arial,sans-serif;letter-spacing:.20em;color:rgba(92,70,50,.50);white-space:nowrap;pointer-events:none;opacity:1;transition:opacity 1.8s ease}
+</style>
+</head>
+<body>
+<div id="app">
+ <canvas id="scene"></canvas>
+  <div id="grain"></div>
+ <div id="label">SCROLL — FOCUS &nbsp; · &nbsp; DRAG — MOVE THE FIELD</div>
+</div>
+
+<script>
+(()=>{
+"use strict";
+const canvas=document.getElementById("scene");
+const ctx=canvas.getContext("2d",{alpha:false,desynchronized:true});
+const TAU=Math.PI*2;
+let W=1,H=1,DPR=1,last=performance.now();
+let organisms=[];
+const pointer={x:-9999,y:-9999,active:false};
+const drag={active:false,lastX:0,lastY:0};
+const field={x:0,y:0};
+let WORLD_W=1,WORLD_H=1;
+const FOCUS_PLANES=4;
+let focusPlane=0,focusTarget=0,focusUnlocked=false;
+let wheelHintUntil=performance.now()+5000;
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const TYPES=[
+ {name:"oval-slow",kind:"oval",speed:.075,turn:.10,baseW:76,baseH:28,alpha:[.38,.76],blur:[0,.25]},
+ {name:"oval-soft",kind:"oval",speed:.12,turn:.16,baseW:62,baseH:23,alpha:[.30,.66],blur:[.7,1.7]},
+ {name:"oval-medium",kind:"oval",speed:.26,turn:.28,baseW:91,baseH:31,alpha:[.38,.80],blur:[0,.55]},
+ {name:"oval-fast",kind:"oval",speed:.55,turn:.55,baseW:55,baseH:20,alpha:[.42,.84],blur:[0,.35]},
+ {name:"oval-veryfast",kind:"oval",speed:.82,turn:.80,baseW:43,baseH:17,alpha:[.34,.76],blur:[0,.25]},
+ {name:"dot-slow",kind:"dot",speed:.10,turn:.20,baseW:8,baseH:8,alpha:[.28,.66],blur:[.2,1.0]},
+ {name:"dot-fast",kind:"dot",speed:.72,turn:1.0,baseW:5,baseH:5,alpha:[.28,.70],blur:[0,.45]},
+ {name:"rod-slow",kind:"rod",speed:.09,turn:.12,baseW:125,baseH:9,alpha:[.32,.70],blur:[.2,1.0]},
+ {name:"rod-medium",kind:"rod",speed:.28,turn:.25,baseW:145,baseH:8,alpha:[.34,.74],blur:[0,.65]},
+ {name:"rod-fast",kind:"rod",speed:.52,turn:.42,baseW:105,baseH:7,alpha:[.36,.78],blur:[0,.35]}
+];
+
+function resize(){
+ W=innerWidth;H=innerHeight;WORLD_W=W*3.5;WORLD_H=H*3.5;
+ field.x=clamp(field.x,W-WORLD_W,0);field.y=clamp(field.y,H-WORLD_H,0);
+ DPR=Math.min(devicePixelRatio||1,1.25);
+ canvas.width=Math.floor(W*DPR);canvas.height=Math.floor(H*DPR);
+ canvas.style.width=W+"px";canvas.style.height=H+"px";ctx.setTransform(DPR,0,0,DPR,0,0);
+ if(!organisms.length){field.x=-(WORLD_W-W)/2;field.y=-(WORLD_H-H)/2;}
+ createOrganisms();
+}
+
+function createOrganisms(){
+ organisms=[];
+ const targetCount=Math.round(clamp(W*H/5000,210,270));
+ const byKind={oval:TYPES.filter(t=>t.kind==="oval"),dot:TYPES.filter(t=>t.kind==="dot"),rod:TYPES.filter(t=>t.kind==="rod")};
+ const quotas={oval:Math.round(targetCount*.70),dot:Math.round(targetCount*.15),rod:Math.round(targetCount*.15)};
+ const list=[];
+ for(const kind of ["oval","dot","rod"]){for(let i=0;i<quotas[kind];i++)list.push(byKind[kind][i%byKind[kind].length]);}
+ for(let i=list.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[list[i],list[j]]=[list[j],list[i]];}
+
+ // CHAOTIC INITIAL DISTRIBUTION ACROSS THE ENTIRE 3.5×3.5 WORLD FIELD.
+ // IMPORTANT: organisms live in world coordinates (0..WORLD_W / 0..WORLD_H),
+ // not in screen coordinates. The circular microscope is only a viewport.
+ // This keeps organisms distributed behind the circle AND outside it.
+ for(let i=0;i<list.length;i++){
+  const type=list[i];
+  const direction=rand(0,TAU);
+  const speed=type.speed*rand(.78,1.22);
+
+  // Completely independent random X/Y positions over the whole field.
+  // No grid, no rows, no circle sampling, no shared center.
+  const x=rand(0,WORLD_W);
+  const y=rand(0,WORLD_H);
+
+  organisms.push({type,x,y,homeX:x,homeY:y,
+    vx:Math.cos(direction)*speed,vy:Math.sin(direction)*speed,
+    angle:direction,targetAngle:direction,
+    scale:rand(1.90,3.20),
+    alpha:rand(type.alpha[0],type.alpha[1]),
+    blur:rand(type.blur[0],type.blur[1]),
+    phase:rand(0,TAU),timer:rand(700,2800),
+    wobble:rand(.6,1.4),bend:rand(.55,.95),
+    seed:Math.random()*1000,depth:(Math.random()*FOCUS_PLANES)|0,
+    escapeTurn:0});
+ }
+}
+
+/* Draw one organism to an offscreen canvas.
+   This makes each microorganism a separate raster object at runtime, while
+   its appearance is reconstructed from the reference rather than copied. */
+function makeDotSprite(type,scale=1){
+ const S=60,c=document.createElement("canvas");c.width=S;c.height=S;
+ const g=c.getContext("2d"),r=type.baseW*.75*scale;
+ const grad=g.createRadialGradient(S/2-r*.25,S/2-r*.25,.2,S/2,S/2,r);
+ grad.addColorStop(0,"rgba(223,196,158,.70)");grad.addColorStop(.55,"rgba(150,116,80,.48)");grad.addColorStop(1,"rgba(82,59,40,.06)");
+ g.fillStyle=grad;g.beginPath();g.arc(S/2,S/2,r,0,TAU);g.fill();
+ g.fillStyle="rgba(73,52,36,.35)";g.beginPath();g.arc(S/2+rand(-r*.25,r*.25),S/2+rand(-r*.25,r*.25),Math.max(.7,r*.22),0,TAU);g.fill();
+ return c;
+}
+function makeRodSprite(type,scale=1){
+ const S=190,c=document.createElement("canvas");c.width=S;c.height=S;const g=c.getContext("2d"),w=type.baseW*scale,h=type.baseH*scale;
+ g.save();g.translate(S/2,S/2);g.lineCap="round";g.lineJoin="round";
+ const grad=g.createLinearGradient(-w/2,0,w/2,0);grad.addColorStop(0,"rgba(104,76,51,.14)");grad.addColorStop(.18,"rgba(151,116,79,.48)");grad.addColorStop(.52,"rgba(188,153,111,.34)");grad.addColorStop(.82,"rgba(126,92,61,.46)");grad.addColorStop(1,"rgba(79,57,39,.12)");
+ g.strokeStyle=grad;g.lineWidth=h;g.beginPath();g.moveTo(-w/2,0);g.bezierCurveTo(-w*.30,-h*1.1,-w*.12,h*.9,w*.03,0);g.bezierCurveTo(w*.18,-h*.85,w*.31,h*.75,w/2,0);g.stroke();
+ g.strokeStyle="rgba(79,57,39,.35)";g.lineWidth=.65;g.beginPath();g.moveTo(-w*.44,0);g.bezierCurveTo(-w*.26,-h*.8,-w*.08,h*.75,w*.04,0);g.bezierCurveTo(w*.17,-h*.65,w*.32,h*.6,w*.44,0);g.stroke();
+ for(let i=0;i<Math.round(w/18);i++){const px=rand(-w*.42,w*.42),py=rand(-h*.28,h*.28);g.fillStyle="rgba(72,50,34,.27)";g.beginPath();g.arc(px,py,rand(.5,1.5)*scale,0,TAU);g.fill();}
+ g.restore();return c;
+}
+
+function makeSprite(type,scale=1){
+ if(type.kind==="dot") return makeDotSprite(type,scale);
+ if(type.kind==="rod") return makeRodSprite(type,scale);
+ const S=320;
+ const c=document.createElement("canvas");
+ c.width=S;c.height=S;
+ const g=c.getContext("2d");
+ const cx=S/2,cy=S/2;
+ const w=type.baseW*scale,h=type.baseH*scale;
+
+ g.clearRect(0,0,S,S);
+ g.save();
+ g.translate(cx,cy);
+
+ // soft translucent body
+ const body=g.createRadialGradient(-w*.18,-h*.12,1,w*.05,h*.08,w*.62);
+ body.addColorStop(0,"rgba(205,177,139,.48)");
+ body.addColorStop(.48,"rgba(159,126,91,.32)");
+ body.addColorStop(1,"rgba(91,67,48,.12)");
+ g.fillStyle=body;
+
+ // asymmetric oval like the photographed organisms
+ g.beginPath();
+ g.moveTo(-w*.52,0);
+ g.bezierCurveTo(-w*.43,-h*.62,-w*.02,-h*.58,w*.36,-h*.33);
+ g.bezierCurveTo(w*.58,-h*.18,w*.58,h*.20,w*.28,h*.42);
+ g.bezierCurveTo(-w*.04,h*.61,-w*.47,h*.50,-w*.55,h*.10);
+ g.bezierCurveTo(-w*.57,h*.05,-w*.56,h*.02,-w*.52,0);
+ g.closePath();
+ g.fill();
+
+ // delicate dark contour, not a hard vector edge
+ g.strokeStyle="rgba(91,67,47,.58)";
+ g.lineWidth=.9;
+ g.stroke();
+
+ // translucent inner membrane line
+ g.strokeStyle="rgba(119,91,65,.34)";
+ g.lineWidth=.55;
+ g.beginPath();
+ g.moveTo(-w*.39,-h*.04);
+ g.bezierCurveTo(-w*.14,-h*.38,w*.20,-h*.27,w*.40,-h*.04);
+ g.bezierCurveTo(w*.18,h*.25,-w*.17,h*.30,-w*.38,h*.10);
+ g.stroke();
+
+ // internal granular material / vacuoles
+ const grainCount=Math.round(42+scale*24);
+ for(let i=0;i<grainCount;i++){
+   const px=rand(-w*.34,w*.33);
+   const py=rand(-h*.29,h*.28);
+   // keep most granules inside the body
+   if((px/(w*.42))**2+(py/(h*.34))**2>1) continue;
+   const rr=rand(.8,2.4)*scale;
+   g.fillStyle=`rgba(${55+((i*17)%35)},${39+((i*11)%25)},${27+((i*7)%18)},${rand(.16,.43)})`;
+   g.beginPath();g.ellipse(px,py,rr,rr*rand(.7,1.5),rand(0,TAU),0,TAU);g.fill();
+ }
+
+ // larger irregular internal bodies
+ for(let i=0;i<8;i++){
+   const px=rand(-w*.22,w*.23),py=rand(-h*.18,h*.16);
+   g.fillStyle="rgba(72,51,35,.20)";
+   g.beginPath();
+   g.ellipse(px,py,rand(4,8)*scale,rand(2,5)*scale,rand(0,TAU),0,TAU);
+   g.fill();
+ }
+
+ // fine cilia, deliberately uneven and sparse
+ g.strokeStyle="rgba(86,63,44,.25)";
+ g.lineWidth=.42;
+ const cilia=18;
+ for(let i=0;i<cilia;i++){
+   const yy=-h*.38+i*(h*.76/(cilia-1));
+   const side=i%2?1:-1;
+   const x0=side>0?w*.37:-w*.40;
+   g.beginPath();
+   g.moveTo(x0,yy);
+   g.quadraticCurveTo(
+     x0+side*rand(2.5,6),
+     yy+rand(-2.5,2.5),
+     x0+side*rand(4,8),
+     yy+rand(-3,3)
+   );
+   g.stroke();
+ }
+
+ // Dense microscopic internal texture: fine granules, tiny vesicles,
+ // membrane irregularities and faint thread-like structures.
+ for(let i=0;i<55;i++){
+   const px=rand(-w*.36,w*.35);
+   const py=rand(-h*.30,h*.29);
+   if((px/(w*.43))**2+(py/(h*.35))**2>1) continue;
+   const rr=rand(.28,1.05)*scale;
+   g.fillStyle=`rgba(${58+((i*13)%38)},${42+((i*9)%30)},${29+((i*7)%22)},${rand(.12,.30)})`;
+   g.beginPath();
+   g.arc(px,py,rr,0,TAU);
+   g.fill();
+ }
+
+ g.strokeStyle="rgba(83,61,42,.18)";
+ g.lineWidth=.42*scale;
+ for(let i=0;i<7;i++){
+   const yy=rand(-h*.25,h*.25);
+   g.beginPath();
+   g.moveTo(-w*.32,yy);
+   g.bezierCurveTo(-w*.10,yy+rand(-h*.12,h*.12),
+                  w*.08,yy+rand(-h*.12,h*.12),w*.34,yy+rand(-h*.08,h*.08));
+   g.stroke();
+ }
+
+ // tiny highlight/reflection
+ g.fillStyle="rgba(245,232,210,.18)";
+ g.beginPath();
+ g.ellipse(-w*.22,-h*.20,w*.12,h*.055,-.3,0,TAU);
+ g.fill();
+
+ g.restore();
+ return c;
+}
+
+const spriteCache=new Map();
+function getSprite(type,scale,blur){
+ const key=type.name+"_"+type.kind+"_"+Math.round(scale*10)+"_"+Math.round(blur*10);
+ if(spriteCache.has(key)) return spriteCache.get(key);
+
+ const base=makeSprite(type,scale);
+ if(blur<=.15){
+   spriteCache.set(key,base);
+   return base;
+ }
+
+ // Pre-blurred raster sprite: no per-object blur filter during animation.
+ const c=document.createElement("canvas");
+ c.width=base.width;c.height=base.height;
+ const g=c.getContext("2d");
+ g.filter=`blur(${blur}px)`;
+ g.drawImage(base,0,0);
+ g.filter="none";
+ spriteCache.set(key,c);
+ return c;
+}
+
+
+const focusSpriteCache=new Map();
+function getFocusSprite(type,scale,blurPx){
+ const bucket=Math.max(0,Math.min(5,Math.round(blurPx)));
+ const key=type.name+"_"+Math.round(scale*10)+"_"+bucket;
+ const cached=focusSpriteCache.get(key);if(cached)return cached;
+ const base=getSprite(type,scale,0);
+ if(bucket===0){focusSpriteCache.set(key,base);return base;}
+ const c=document.createElement("canvas");c.width=base.width;c.height=base.height;
+ const g=c.getContext("2d");g.filter=`blur(${bucket}px)`;g.drawImage(base,0,0);g.filter="none";
+ focusSpriteCache.set(key,c);return c;
+}
+
+function focusDistanceFor(o){return Math.abs(o.depth-focusPlane);}
+
+function onWheel(e){
+ e.preventDefault();
+ const dir=e.deltaY>0?1:-1;
+ if(!focusUnlocked){focusUnlocked=true;focusPlane=dir>0?1:FOCUS_PLANES-2;}
+ else focusPlane=Math.max(0,Math.min(FOCUS_PLANES-1,focusPlane+dir));
+ focusTarget=focusPlane;
+ const label=document.getElementById("label");if(label)label.style.opacity="0";
+ wheelHintUntil=performance.now()+1800;
+}
+function pointerMove(e){
+ pointer.x=e.clientX;pointer.y=e.clientY;pointer.active=true;
+ if(drag.active){const dx=e.clientX-drag.lastX,dy=e.clientY-drag.lastY;field.x=clamp(field.x+dx,W-WORLD_W,0);field.y=clamp(field.y+dy,H-WORLD_H,0);drag.lastX=e.clientX;drag.lastY=e.clientY;}
+}
+function pointerLeave(){pointer.active=false}
+function pointerDown(e){
+ pointer.x=e.clientX;pointer.y=e.clientY;pointer.active=true;
+ // Clicking empty space still drags the whole microorganism field.
+ drag.active=true;drag.lastX=e.clientX;drag.lastY=e.clientY;
+ canvas.classList.add("dragging");canvas.setPointerCapture?.(e.pointerId);
+}
+function pointerUp(e){
+ drag.active=false;canvas.classList.remove("dragging");
+ try{canvas.releasePointerCapture?.(e.pointerId)}catch(_){}
+}
+
+function update(o,dt,now){
+  o.timer-=dt*16.67;
+  const t=o.type;
+
+  // Slow, water-like autonomous drift. Direction changes happen rarely and
+  // are never caused directly by the cursor.
+  if(o.timer<=0){
+    o.targetAngle += rand(-t.turn,t.turn);
+    o.timer=rand(2200,5200);
+  }
+
+  // Cursor = gentle displacement force only.
+  // It never changes o.angle or commands a turn.
+  if(pointer.active){
+    const wx=pointer.x-field.x, wy=pointer.y-field.y;
+    const dx=o.x-wx, dy=o.y-wy;
+    const d2=dx*dx+dy*dy;
+    const radius=300;
+
+    if(d2<radius*radius){
+      const d=Math.sqrt(d2)||1;
+      const falloff=Math.pow(1-d/radius,2.6);
+      const nx=dx/d, ny=dy/d;
+      const tx=-ny, ty=nx;
+      const side=(o.seed%2)<1?1:-1;
+      const force=falloff*(0.014+0.006*(1-d/radius));
+
+      o.vx += (nx*.88 + tx*.12*side)*force*dt;
+      o.vy += (ny*.88 + ty*.12*side)*force*dt;
+
+      // A little escape tilt: up to 45 degrees, smoothed like a body in liquid.
+      const escapeAngle=Math.atan2(ny,nx);
+      let rel=escapeAngle-o.targetAngle;
+      rel=Math.atan2(Math.sin(rel),Math.cos(rel));
+      const desiredTurn=clamp(rel,-Math.PI/4,Math.PI/4)*Math.min(1,falloff*1.8);
+      o.escapeTurn+=(desiredTurn-o.escapeTurn)*Math.min(1,.035*dt);
+    } else {
+      o.escapeTurn+=(0-o.escapeTurn)*Math.min(1,.012*dt);
+    }
+  }
+  // Strong drag / low inertia: movement settles slowly and smoothly like
+  // microorganisms suspended in fluid, rather than like particles in space.
+  const desiredSpeed=t.speed*2.6;
+  const visualAngle=o.targetAngle+o.escapeTurn;
+  const targetVX=Math.cos(o.targetAngle)*desiredSpeed;
+  const targetVY=Math.sin(o.targetAngle)*desiredSpeed;
+  const steering=(t.kind==="rod" ? .0048:.0065)*dt;
+
+  o.vx+=(targetVX-o.vx)*steering;
+  o.vy+=(targetVY-o.vy)*steering;
+
+  // Subtle Brownian motion, heavily damped.
+  o.vx+=Math.sin(now*.00023*o.wobble+o.phase)*.00055*dt;
+  o.vy+=Math.cos(now*.00019*o.wobble+o.phase)*.00055*dt;
+
+  o.vx*=Math.pow(.985,dt);
+  o.vy*=Math.pow(.985,dt);
+
+  const max=t.speed*3.4;
+  const v=Math.hypot(o.vx,o.vy);
+  if(v>max){
+    o.vx=o.vx/v*max;
+    o.vy=o.vy/v*max;
+  }
+
+  o.x+=o.vx*dt;
+  o.y+=o.vy*dt;
+
+  // IMPORTANT: orientation is independent of velocity.
+  // The cursor can push the organism sideways or away, but can NEVER rotate it.
+  // Each organism keeps its own orientation while swimming through the liquid.
+
+  // Keep organisms inside the full 3.5×3.5 world field.
+  // The microscope circle is only a viewport into this larger field.
+  const margin=120;
+  const minX=-margin, maxX=WORLD_W+margin;
+  const minY=-margin, maxY=WORLD_H+margin;
+
+  if(o.x<minX){o.x=minX;o.vx=Math.abs(o.vx)*.25;}
+  if(o.x>maxX){o.x=maxX;o.vx=-Math.abs(o.vx)*.25;}
+  if(o.y<minY){o.y=minY;o.vy=Math.abs(o.vy)*.25;}
+  if(o.y>maxY){o.y=maxY;o.vy=-Math.abs(o.vy)*.25;}
+}
+
+function drawOrganism(o,now){
+ const sx=o.x+field.x,sy=o.y+field.y,margin=500;
+ if(sx<-margin||sx>W+margin||sy<-margin||sy>H+margin)return;
+ const planeDistance=Math.abs(o.depth-focusPlane);
+ const dofBlur=focusUnlocked?planeDistance*2.15:2.8+planeDistance*1.25;
+ ctx.save();ctx.globalAlpha=o.alpha;ctx.translate(sx,sy);ctx.rotate(o.angle+o.escapeTurn);
+ if(o.type.kind==="rod")drawWavyRod(o,now,dofBlur);
+ else{const sprite=getFocusSprite(o.type,o.scale,dofBlur),sw=sprite.width*.82,sh=sprite.height*.82;ctx.drawImage(sprite,-sw/2,-sh/2,sw,sh);}
+ ctx.restore();
+}
+
+function drawWavyRod(o,now,blurAmount){
+ const w=o.type.baseW*o.scale,h=o.type.baseH*o.scale;
+ // Deliberately slow deformation, synchronized with the organism's slow swimming.
+ const phase=now*.00052*o.bend+o.phase,amp=h*(1.35+0.16*Math.sin(o.phase)),segments=22;
+ if(blurAmount>.5)ctx.filter=`blur(${Math.min(3,blurAmount).toFixed(1)}px)`;
+ ctx.lineCap="round";ctx.lineJoin="round";
+ function path(width,stroke){ctx.lineWidth=width;ctx.strokeStyle=stroke;ctx.beginPath();for(let i=0;i<segments;i++){const u=i/(segments-1),x=-w/2+u*w,y=Math.sin(u*TAU*1.25+phase)*amp+Math.sin(u*TAU*.52-phase*.3)*amp*.20;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();}
+ path(h*1.48,"rgba(157,121,84,.22)");path(h*.78,"rgba(112,79,52,.40)");path(Math.max(.5,h*.14),"rgba(66,46,31,.30)");ctx.filter="none";
+}
+
+function frame(now){
+ const dt=Math.min(2,Math.max(.5,(now-last)/16.667));last=now;focusPlane+=(focusTarget-focusPlane)*.12*dt;
+ ctx.setTransform(DPR,0,0,DPR,0,0);ctx.fillStyle="#080604";ctx.fillRect(0,0,W,H);
+ const R=Math.min(W,H)*.455;
+ ctx.save();ctx.beginPath();ctx.arc(W/2,H/2,R,0,TAU);ctx.clip();
+ ctx.fillStyle="#f2eee4";ctx.fillRect(W/2-R,H/2-R,R*2,R*2);
+ for(const o of organisms)update(o,dt,now);
+ for(const o of organisms)drawOrganism(o,now);
+ ctx.restore();
+ if(drag.active){
+  ctx.save();ctx.globalCompositeOperation="screen";const segs=20;
+  for(let i=0;i<segs;i++){if(i%3===1)continue;const a0=i/segs*TAU+.01,a1=a0+.075+((i*5)%5)*.012;ctx.strokeStyle=i%2?"rgba(255,105,170,.18)":"rgba(80,235,180,.16)";ctx.lineWidth=1;ctx.beginPath();ctx.arc(W/2,H/2,R+((i%3)-1)*1.7,a0,a1);ctx.stroke();}
+  ctx.restore();
+ }
+ const label=document.getElementById("label");if(label&&performance.now()>wheelHintUntil&&!drag.active)label.style.opacity="0";
+ requestAnimationFrame(frame);
+}
+
+addEventListener("resize",resize,{passive:true});
+canvas.addEventListener("wheel",onWheel,{passive:false});
+canvas.addEventListener("pointermove",pointerMove,{passive:true});
+canvas.addEventListener("pointerleave",pointerLeave,{passive:true});
+canvas.addEventListener("pointerdown",pointerDown,{passive:true});
+canvas.addEventListener("pointerup",pointerUp,{passive:true});
+canvas.addEventListener("pointercancel",pointerUp,{passive:true});
+
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
